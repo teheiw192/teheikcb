@@ -1,7 +1,7 @@
 name: teheikcb
-version: 1.0.0
-description: 课程表管理插件，支持课程表上传、识别和提醒，以及本地图库管理功能
 author: teheiw192
+description: 课程提醒插件
+version: 1.0.0
 repository: https://github.com/teheiw192/teheikcb
 license: MIT
 tags:
