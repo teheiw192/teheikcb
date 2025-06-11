@@ -19,173 +19,463 @@ import traceback
 import random
 from PIL import Image
 import io
+from datetime import datetime, timedelta
+import locale
+from typing import Dict, List, Optional
+from astrbot.api import logger
+import astrbot.api.message_components as Comp
+from astrbot.core.pipeline import Pipeline
 
-# 引入 logger
-from astrbot.logger import logger
-
-@register("teheikcb", "teheiw192", "课程表提醒插件", "1.0.0", "https://github.com/teheiw192/teheikcb")
-class KCBXTPlugin(Star):
-    def __init__(self, context: Context):
-        super().__init__(context)
-        self.data_dir = os.path.join(os.path.dirname(__file__), "data")
-        self.gallery_dir = os.path.join(self.data_dir, "galleries")
-        self.gallery_info_file = os.path.join(self.data_dir, "gallery_info.json")
-        os.makedirs(self.data_dir, exist_ok=True)
-        os.makedirs(self.gallery_dir, exist_ok=True)
-
-        # 初始化图库管理器
-        self.default_gallery_info = {
-            "name": "local",
-            "path": os.path.join(self.gallery_dir, "local"),
-            "creator_id": "127001",
-            "creator_name": "local",
-            "capacity": 200,
-            "compress": True,
-            "duplicate": True,
-            "fuzzy": False,
-        }
-        self.gm = GalleryManager(self.gallery_dir, self.gallery_info_file, self.default_gallery_info)
-
-        # 启动定时提醒任务
-        asyncio.create_task(self.reminder_loop())
-
-    @filter.command("kcbxt")
-    async def show_table(self, event: AstrMessageEvent):
-        """展示用户的课程表"""
-        user_id = event.get_sender_id()
-        table_path = os.path.join(self.data_dir, f"{user_id}.json")
-        if not os.path.exists(table_path):
-            yield event.plain_result("你还没有上传课程表，请发送Word或图片格式的课程表。")
-            return
-        with open(table_path, "r", encoding="utf-8") as f:
-            table = json.load(f)
-        msg = "你的课程表：\n"
-        for c in table["courses"]:
-            msg += f"{c['course_name']} {c['day']} {c['time']} {c['classroom']} {c['teacher']}\n"
-        yield event.plain_result(msg)
-
-    @filter.command("kcbxt today")
-    async def show_today(self, event: AstrMessageEvent):
-        """展示用户当天课程"""
-        user_id = event.get_sender_id()
-        table_path = os.path.join(self.data_dir, f"{user_id}.json")
-        if not os.path.exists(table_path):
-            yield event.plain_result("你还没有上传课程表，请发送Word或图片格式的课程表。")
-            return
-        with open(table_path, "r", encoding="utf-8") as f:
-            table = json.load(f)
-        today = get_today_weekday()
-        msg = f"你今天({today})的课程：\n"
-        found = False
-        for c in table["courses"]:
-            if c['day'] == today:
-                msg += f"{c['course_name']} {c['time']} {c['classroom']} {c['teacher']}\n"
-                found = True
-        if not found:
-            msg += "今天没有课程！"
-        yield event.plain_result(msg)
-
-    @filter.event_message_type(EventMessageType.GROUP_MESSAGE | EventMessageType.PRIVATE_MESSAGE)
-    async def on_file_or_image(self, event: AstrMessageEvent, *args, **kwargs):
-        """监听群聊和私聊消息，自动识别Word/图片/Excel并解析课程表"""
-        from astrbot.api.message_components import File, Image
-        ocr_api_url = getattr(self, 'config', {}).get('ocr_api_url')
-        ocr_api_key = getattr(self, 'config', {}).get('ocr_api_key')
-        for comp in event.get_messages():
-            if isinstance(comp, (File, Image)):
-                file_url = comp.file
-                file_name = getattr(comp, "name", "") or os.path.basename(file_url)
-                ext = os.path.splitext(file_name)[-1].lower()
-                user_id = event.get_sender_id()
-                save_path = os.path.join(self.data_dir, f"{user_id}{ext}")
-                try:
-                    # 下载或复制文件到本地
-                    await download_file(file_url, save_path)
-                    
-                    if ext in [".docx", ".doc"]:
-                        courses = parse_word(save_path)
-                    elif ext in [".xlsx", ".xls"]:
-                        courses = parse_xlsx(save_path)
-                    elif ext in [".jpg", ".jpeg", ".png", ".bmp"]:
-                        courses = parse_image(save_path)
-                    else:
-                        await event.send(event.plain_result("暂不支持该文件类型，仅支持Word、Excel或图片格式的课程表！"))
-                        return
-                    
-                    if not courses:
-                        await event.send(event.plain_result("未能从文件中识别出课程表信息，请检查文件格式是否正确。"))
-                        return
-                        
-                    data = {
-                        "courses": courses,
-                        "unified_msg_origin": event.unified_msg_origin
-                    }
-                    with open(os.path.join(self.data_dir, f"{user_id}.json"), "w", encoding="utf-8") as f:
-                        json.dump(data, f, ensure_ascii=False, indent=2)
-                    await event.send(event.plain_result("课程表解析并保存成功！"))
-                except Exception as e:
-                    error_msg = f"处理课程表时发生错误: {e}"
-                    await event.send(event.plain_result(f":( {error_msg}")) # 用户友好提示
-                    logger.error(f"[KCBXT] {error_msg}\n{traceback.format_exc()}") # 详细日志用于调试
-                return
+# 设置中文locale
+try:
+    locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
+except:
+    try:
+        locale.setlocale(locale.LC_ALL, 'zh_CN')
+    except:
         pass
 
-    @filter.event_message_type(EventMessageType.PLAIN_MESSAGE)
-    async def on_plain_message(self, event: AstrMessageEvent, *args, **kwargs):
-        """监听纯文本消息，尝试解析课程表文字"""
-        text_content = event.get_plain_text()
-        if not text_content:
-            return
-        
-        # 检查是否是指令消息，避免重复处理
-        if text_content.startswith("/"):
-            return
+# 课程消息模板
+COURSE_TEMPLATE = """【姓名同学学年学期课程安排】
 
-        # 尝试解析课程表文字
-        user_id = event.get_sender_id()
+📚 基本信息
+
+• 学校：XX大学（没有则不显示）
+
+• 班级：XX班（没有则不显示）
+
+• 专业：XX专业（没有则不显示）
+
+• 学院：XX学院（没有则不显示）
+
+🗓️ 每周课程详情
+星期X
+
+• 上课时间（节次和时间）：
+课程名称
+教师：老师姓名
+上课地点：教室/场地
+周次：具体周次
+
+示例：
+星期一
+上课时间：第1-2节（08:00-09:40）
+课程名称：如何找到富婆
+教师：飘逸
+上课地点150123
+周次：1-16周
+
+周末：无课程。
+
+🌙 晚间课程
+
+• 上课时间（节次和时间）：
+课程名称
+教师：老师姓名
+上课地点：教室/场地
+周次：具体周次
+
+📌 重要备注
+
+• 备注内容1
+
+• 备注内容2
+
+请留意课程周次及教室安排，合理规划学习时间！"""
+
+# 课程提醒模板
+REMINDER_TEMPLATE = """同学你好，待会有课哦
+上课时间（节次和时间）：
+课程名称
+教师：老师姓名
+上课地点：教室/场地"""
+
+@register("teheikcb", "teheiw192", "课程提醒插件", "1.0.0", "https://github.com/teheiw192/teheikcb")
+class CourseReminderPlugin(Star):
+    def __init__(self, context: Context, config: Dict):
+        super().__init__(context)
+        self.config = config
+        self.data_dir = os.path.join("data", "teheikcb")
+        os.makedirs(self.data_dir, exist_ok=True)
+        self.schedules: Dict[str, Dict] = {}  # 用户ID -> {courses: List[Dict], settings: Dict}
+        self.reminder_tasks: Dict[str, asyncio.Task] = {}
+        self.load_schedules()
+        asyncio.create_task(self.check_reminders())
+
+    async def parse_course_with_ai(self, text: str) -> Tuple[List[Dict], Dict]:
+        """使用AI模型解析课程信息"""
+        prompt = f"""请帮我解析以下课程表信息，提取出所有课程的基本信息和课程安排。
+要求：
+1. 提取基本信息：学校、班级、专业、学院
+2. 提取每个课程的：星期、上课时间、课程名称、教师、上课地点、周次
+3. 返回JSON格式，包含两个部分：
+   - basic_info: 包含基本信息
+   - courses: 包含课程列表，每个课程包含day, time, name, teacher, location, weeks字段
+
+课程表信息：
+{text}
+
+请直接返回JSON格式的数据，不要有其他文字说明。"""
+
         try:
-            courses = parse_text_schedule(text_content)
-            if courses:
-                data = {
-                    "courses": courses,
-                    "unified_msg_origin": event.unified_msg_origin
-                }
-                with open(os.path.join(self.data_dir, f"{user_id}.json"), "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                await event.send(event.plain_result("课程表文字解析并保存成功！请使用 \"kcbxt\" 命令查看。" + "(注意：纯文本解析可能不完全准确，请核对。)"))
-            else:
-                await event.send(event.plain_result("未能从文本中识别出课程表信息，请尝试以下格式：课程名 时间 地点 老师"))
+            # 使用AstrBot的AI模型
+            pipeline = Pipeline()
+            response = await pipeline.llm_request(prompt)
+            if response and response.content:
+                result = json.loads(response.content)
+                return result.get("courses", []), result.get("basic_info", {})
         except Exception as e:
-            error_msg = f"处理课程表文字时发生错误: {e}"
-            await event.send(event.plain_result(f":( {error_msg}"))
-            logger.error(f"[KCBXT] {error_msg}\n{traceback.format_exc()}")
-        return
+            logger.error(f"AI解析课程表失败: {e}")
+        
+        return [], {}
 
-    async def reminder_loop(self):
-        """定时检查并提醒所有用户"""
+    def load_schedules(self):
+        """加载所有用户的课程表"""
+        schedule_file = os.path.join(self.data_dir, "schedules.json")
+        if os.path.exists(schedule_file):
+            try:
+                with open(schedule_file, "r", encoding="utf-8") as f:
+                    self.schedules = json.load(f)
+            except Exception as e:
+                logger.error(f"加载课程表失败: {e}")
+                self.schedules = {}
+
+    def save_schedules(self):
+        """保存所有用户的课程表"""
+        schedule_file = os.path.join(self.data_dir, "schedules.json")
+        try:
+            with open(schedule_file, "w", encoding="utf-8") as f:
+                json.dump(self.schedules, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"保存课程表失败: {e}")
+
+    def get_user_settings(self, user_id: str) -> Dict:
+        """获取用户设置"""
+        if user_id not in self.schedules:
+            self.schedules[user_id] = {
+                "courses": [],
+                "settings": {
+                    "enable_reminder": True,
+                    "reminder_time": self.config.get("reminder_time", 30),
+                    "enable_daily_reminder": self.config.get("enable_daily_reminder", True)
+                },
+                "basic_info": {}
+            }
+        return self.schedules[user_id]["settings"]
+
+    def format_course_time(self, time_str: str) -> str:
+        """格式化课程时间"""
+        if "第" in time_str and "节" in time_str:
+            period = time_str.split("第")[1].split("节")[0]
+            time_slots = self.config.get("time_slots", {})
+            if period in time_slots:
+                return f"{time_str}（{time_slots[period]}）"
+        return time_str
+
+    def parse_time_slot(self, time_str: str) -> Optional[Tuple[str, str]]:
+        """解析课程时间段，返回开始时间和结束时间"""
+        if "第" in time_str and "节" in time_str:
+            period = time_str.split("第")[1].split("节")[0]
+            time_slots = self.config.get("time_slots", {})
+            if period in time_slots:
+                start_time, end_time = time_slots[period].split("-")
+                return start_time, end_time
+        return None
+
+    @filter.command("课程表")
+    async def show_schedule(self, event: AstrMessageEvent):
+        """显示课程表"""
+        user_id = event.get_sender_id()
+        if user_id not in self.schedules:
+            yield event.plain_result("你还没有设置课程表哦！请发送课程表文本给我。")
+            return
+
+        courses = self.schedules[user_id].get("courses", [])
+        basic_info = self.schedules[user_id].get("basic_info", {})
+        if not courses:
+            yield event.plain_result("你的课程表是空的！")
+            return
+
+        # 按星期分组
+        days = {}
+        for course in courses:
+            day = course.get("day", "未知")
+            if day not in days:
+                days[day] = []
+            days[day].append(course)
+
+        # 构建消息
+        message = "📚 你的课程表：\n\n"
+        
+        # 添加基本信息
+        if basic_info:
+            message += "【基本信息】\n"
+            for key, value in basic_info.items():
+                message += f"{key}：{value}\n"
+            message += "\n"
+
+        # 添加课程信息
+        for day in ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]:
+            if day in days:
+                message += f"【{day}】\n"
+                for course in days[day]:
+                    message += f"时间：{self.format_course_time(course['time'])}\n"
+                    message += f"课程：{course['name']}\n"
+                    message += f"教师：{course['teacher']}\n"
+                    message += f"地点：{course['location']}\n"
+                    message += f"周次：{course['weeks']}\n\n"
+
+        yield event.plain_result(message)
+
+    @filter.command("今日课程")
+    async def show_today_courses(self, event: AstrMessageEvent):
+        """显示今日课程"""
+        user_id = event.get_sender_id()
+        if user_id not in self.schedules:
+            yield event.plain_result("你还没有设置课程表哦！")
+            return
+
+        today = datetime.now().strftime("%A")
+        today_cn = {
+            "Monday": "星期一",
+            "Tuesday": "星期二",
+            "Wednesday": "星期三",
+            "Thursday": "星期四",
+            "Friday": "星期五",
+            "Saturday": "星期六",
+            "Sunday": "星期日"
+        }[today]
+
+        courses = [c for c in self.schedules[user_id].get("courses", []) if c.get("day") == today_cn]
+        if not courses:
+            yield event.plain_result(f"今天（{today_cn}）没有课程安排！")
+            return
+
+        message = f"📚 今日（{today_cn}）课程：\n\n"
+        for course in courses:
+            message += f"时间：{self.format_course_time(course['time'])}\n"
+            message += f"课程：{course['name']}\n"
+            message += f"教师：{course['teacher']}\n"
+            message += f"地点：{course['location']}\n"
+            message += f"周次：{course['weeks']}\n\n"
+
+        yield event.plain_result(message)
+
+    @filter.command("测试提醒")
+    async def test_reminder(self, event: AstrMessageEvent):
+        """测试课程提醒"""
+        user_id = event.get_sender_id()
+        if user_id not in self.schedules:
+            yield event.plain_result("你还没有设置课程表哦！")
+            return
+
+        courses = self.schedules[user_id].get("courses", [])
+        if not courses:
+            yield event.plain_result("你的课程表是空的！")
+            return
+
+        # 发送测试提醒
+        course = courses[0]  # 使用第一个课程作为测试
+        message = REMINDER_TEMPLATE.replace("上课时间（节次和时间）：", f"上课时间：{self.format_course_time(course['time'])}")
+        message = message.replace("课程名称", course['name'])
+        message = message.replace("老师姓名", course['teacher'])
+        message = message.replace("教室/场地", course['location'])
+
+        yield event.plain_result(message)
+
+    @filter.command("提醒设置")
+    async def reminder_settings(self, event: AstrMessageEvent):
+        """设置提醒选项"""
+        user_id = event.get_sender_id()
+        settings = self.get_user_settings(user_id)
+        
+        message = "📝 提醒设置：\n\n"
+        message += f"1. 自动提醒：{'开启' if settings['enable_reminder'] else '关闭'}\n"
+        message += f"2. 提醒时间：上课前 {settings['reminder_time']} 分钟\n"
+        message += f"3. 每日提醒：{'开启' if settings['enable_daily_reminder'] else '关闭'}\n\n"
+        message += "回复数字 1-3 修改对应设置，或回复其他内容退出设置。"
+        
+        yield event.plain_result(message)
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def on_message(self, event: AstrMessageEvent):
+        """处理所有消息"""
+        # 检查是否是图片或文件
+        if event.message_obj.type in ["image", "file"]:
+            template = """抱歉，我暂时不支持识别图片和文件。
+
+请按照以下步骤操作：
+1. 复制下方课程消息模板
+2. 将课程表图片或文件发送给豆包
+3. 让豆包生成课程表文本
+4. 将生成的文本发送给我
+
+【课程消息模板】
+
+【姓名同学学年学期课程安排】
+
+📚 基本信息
+
+• 学校：XX大学（没有则不显示）
+
+• 班级：XX班（没有则不显示）
+
+• 专业：XX专业（没有则不显示）
+
+• 学院：XX学院（没有则不显示）
+
+🗓️ 每周课程详情
+星期X
+
+• 上课时间（节次和时间）：
+课程名称
+教师：老师姓名
+上课地点：教室/场地
+周次：具体周次
+
+示例：
+星期一
+上课时间：第1-2节（08:00-09:40）
+课程名称：如何找到富婆
+教师：飘逸
+上课地点150123
+周次：1-16周
+
+周末：无课程。
+
+🌙 晚间课程
+
+• 上课时间（节次和时间）：
+课程名称
+教师：老师姓名
+上课地点：教室/场地
+周次：具体周次
+
+📌 重要备注
+
+• 备注内容1
+
+• 备注内容2
+
+请留意课程周次及教室安排，合理规划学习时间！"""
+            yield event.plain_result(template)
+            return
+
+        # 处理文本消息
+        text = event.message_str.strip()
+        if not text:
+            return
+
+        # 使用AI解析课程表
+        try:
+            courses, basic_info = await self.parse_course_with_ai(text)
+            if not courses:
+                yield event.plain_result("抱歉，我无法识别这个课程表格式。请确保按照模板格式发送。")
+                return
+
+            # 保存课程表
+            user_id = event.get_sender_id()
+            if user_id not in self.schedules:
+                self.schedules[user_id] = {
+                    "courses": [],
+                    "settings": {
+                        "enable_reminder": True,
+                        "reminder_time": self.config.get("reminder_time", 30),
+                        "enable_daily_reminder": self.config.get("enable_daily_reminder", True)
+                    },
+                    "basic_info": {}
+                }
+            
+            self.schedules[user_id]["courses"] = courses
+            self.schedules[user_id]["basic_info"] = basic_info
+            self.save_schedules()
+
+            # 发送确认消息
+            yield event.plain_result("课程表已保存！\n\n请确认以下课程信息是否正确：")
+            yield event.plain_result(text)
+            yield event.plain_result("\n如果信息正确，系统将自动开启课程提醒功能。\n\n你可以使用以下命令：\n/课程表 - 查看完整课程表\n/今日课程 - 查看今日课程\n/测试提醒 - 测试课程提醒功能\n/提醒设置 - 设置提醒选项")
+
+        except Exception as e:
+            logger.error(f"解析课程表失败: {e}")
+            yield event.plain_result("抱歉，我无法识别这个课程表格式。请确保按照模板格式发送。")
+
+    async def check_reminders(self):
+        """检查并发送课程提醒"""
         while True:
-            await self.check_and_remind()
+            try:
+                now = datetime.now()
+                
+                # 检查每日提醒
+                if self.config.get("enable_daily_reminder", True):
+                    daily_time = self.config.get("daily_reminder_time", "23:00")
+                    if now.strftime("%H:%M") == daily_time:
+                        for user_id, data in self.schedules.items():
+                            settings = data.get("settings", {})
+                            if not settings.get("enable_daily_reminder", True):
+                                continue
+                                
+                            tomorrow = (now + timedelta(days=1)).strftime("%A")
+                            tomorrow_cn = {
+                                "Monday": "星期一",
+                                "Tuesday": "星期二",
+                                "Wednesday": "星期三",
+                                "Thursday": "星期四",
+                                "Friday": "星期五",
+                                "Saturday": "星期六",
+                                "Sunday": "星期日"
+                            }[tomorrow]
+
+                            tomorrow_courses = [c for c in data.get("courses", []) if c.get("day") == tomorrow_cn]
+                            if tomorrow_courses:
+                                message = f"📚 明日（{tomorrow_cn}）课程安排：\n\n"
+                                for course in tomorrow_courses:
+                                    message += f"时间：{self.format_course_time(course['time'])}\n"
+                                    message += f"课程：{course['name']}\n"
+                                    message += f"教师：{course['teacher']}\n"
+                                    message += f"地点：{course['location']}\n"
+                                    message += f"周次：{course['weeks']}\n\n"
+                                message += "是否开启明日课程提醒？回复\"是\"开启提醒。"
+
+                                # 发送消息
+                                await self.context.send_message(user_id, [Comp.Plain(message)])
+
+                # 检查当前课程提醒
+                if self.config.get("enable_auto_reminder", True):
+                    for user_id, data in self.schedules.items():
+                        settings = data.get("settings", {})
+                        if not settings.get("enable_reminder", True):
+                            continue
+                            
+                        reminder_time = settings.get("reminder_time", self.config.get("reminder_time", 30))
+                        
+                        for course in data.get("courses", []):
+                            # 解析课程时间
+                            time_slot = self.parse_time_slot(course['time'])
+                            if time_slot:
+                                start_time, _ = time_slot
+                                # 检查是否需要提醒
+                                course_time = datetime.strptime(start_time, "%H:%M").time()
+                                reminder_time_obj = (datetime.combine(now.date(), course_time) - 
+                                                   timedelta(minutes=reminder_time)).time()
+                                
+                                if now.time() == reminder_time_obj:
+                                    message = REMINDER_TEMPLATE.replace("上课时间（节次和时间）：", f"上课时间：{self.format_course_time(course['time'])}")
+                                    message = message.replace("课程名称", course['name'])
+                                    message = message.replace("老师姓名", course['teacher'])
+                                    message = message.replace("教室/场地", course['location'])
+
+                                    # 发送提醒
+                                    await self.context.send_message(user_id, [Comp.Plain(message)])
+
+            except Exception as e:
+                logger.error(f"检查课程提醒失败: {e}")
+
             await asyncio.sleep(60)  # 每分钟检查一次
 
-    async def check_and_remind(self):
-        """检查所有用户，是否有课程需要提醒"""
-        now = datetime.datetime.now()
-        today = get_today_weekday()
-        for file in os.listdir(self.data_dir):
-            if file.endswith(".json"):
-                with open(os.path.join(self.data_dir, file), "r", encoding="utf-8") as f:
-                    table = json.load(f)
-                unified_msg_origin = table.get("unified_msg_origin")
-                for c in table["courses"]:
-                    if c['day'] == today:
-                        class_time = get_class_time_from_str(c['time'])
-                        if class_time:
-                            class_dt = now.replace(hour=class_time[0], minute=class_time[1], second=0, microsecond=0)
-                            delta = (class_dt - now).total_seconds()
-                            if 0 < delta <= 600 and unified_msg_origin:  # 提前10分钟提醒
-                                await self.context.send_message(unified_msg_origin, [f"上课提醒：{c['course_name']} {c['time']} {c['classroom']} {c['teacher']}"])
+    async def terminate(self):
+        """插件终止时保存数据"""
+        self.save_schedules()
 
-    # 图库相关功能
     @filter.command("图库帮助")
     async def gallery_help(self, event: AstrMessageEvent):
         """显示图库帮助信息"""
@@ -357,8 +647,6 @@ class KCBXTPlugin(Star):
 
 def get_today_weekday():
     """获取今天的星期"""
-    import locale
-    locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
     week_map = {
         'Monday': '星期一',
         'Tuesday': '星期二',
