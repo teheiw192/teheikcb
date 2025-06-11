@@ -23,7 +23,7 @@ import io
 # 引入 logger
 from astrbot.logger import logger
 
-@register("kcbxt", "teheiw192", "课程表提醒插件", "1.0.0", "https://github.com/teheiw192/kcbxt")
+@register("teheikcb", "teheiw192", "课程表提醒插件", "1.0.0", "https://github.com/teheiw192/teheikcb")
 class KCBXTPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
