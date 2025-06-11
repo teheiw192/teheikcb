@@ -61,7 +61,7 @@ class KCBXTPlugin(Star):
             table = json.load(f)
         msg = "你的课程表：\n"
         for c in table["courses"]:
-            msg += f"{c['course']} {c['time']} {c['location']} {c['teacher']}\n"
+            msg += f"{c['course_name']} {c['day']} {c['time']} {c['classroom']} {c['teacher']}\n"
         yield event.plain_result(msg)
 
     @filter.command("kcbxt today")
@@ -78,8 +78,8 @@ class KCBXTPlugin(Star):
         msg = f"你今天({today})的课程：\n"
         found = False
         for c in table["courses"]:
-            if today in c['time']:
-                msg += f"{c['course']} {c['time']} {c['location']} {c['teacher']}\n"
+            if c['day'] == today:
+                msg += f"{c['course_name']} {c['time']} {c['classroom']} {c['teacher']}\n"
                 found = True
         if not found:
             msg += "今天没有课程！"
@@ -104,16 +104,18 @@ class KCBXTPlugin(Star):
                     
                     if ext in [".docx", ".doc"]:
                         courses = parse_word(save_path)
-                    elif ext in [".xlsx"]:
+                    elif ext in [".xlsx", ".xls"]:
                         courses = parse_xlsx(save_path)
                     elif ext in [".jpg", ".jpeg", ".png", ".bmp"]:
-                        if not ocr_api_url:
-                            await event.send(event.plain_result("请在插件后台配置图片识别API接口！"))
-                            return
-                        courses = await parse_image(save_path, ocr_api_url, ocr_api_key)
+                        courses = parse_image(save_path)
                     else:
                         await event.send(event.plain_result("暂不支持该文件类型，仅支持Word、Excel或图片格式的课程表！"))
                         return
+                    
+                    if not courses:
+                        await event.send(event.plain_result("未能从文件中识别出课程表信息，请检查文件格式是否正确。"))
+                        return
+                        
                     data = {
                         "courses": courses,
                         "unified_msg_origin": event.unified_msg_origin
@@ -175,15 +177,13 @@ class KCBXTPlugin(Star):
                     table = json.load(f)
                 unified_msg_origin = table.get("unified_msg_origin")
                 for c in table["courses"]:
-                    # 假设时间字段格式如"周一第1-2节"
-                    if today in c['time']:
-                        # 假设上课时间为08:00，实际可扩展为解析具体时间
+                    if c['day'] == today:
                         class_time = get_class_time_from_str(c['time'])
                         if class_time:
                             class_dt = now.replace(hour=class_time[0], minute=class_time[1], second=0, microsecond=0)
                             delta = (class_dt - now).total_seconds()
                             if 0 < delta <= 600 and unified_msg_origin:  # 提前10分钟提醒
-                                await self.context.send_message(unified_msg_origin, [f"上课提醒：{c['course']} {c['time']} {c['location']} {c['teacher']}"])
+                                await self.context.send_message(unified_msg_origin, [f"上课提醒：{c['course_name']} {c['time']} {c['classroom']} {c['teacher']}"])
 
     # 图库相关功能
     @filter.command("图库帮助")
@@ -248,8 +248,6 @@ class KCBXTPlugin(Star):
                     yield event.plain_result(f"保存图片失败: {str(e)}")
                 return
 
-        yield event.plain_result("请发送要保存的图片")
-
     @filter.command("删图")
     async def delete_image(self, event: AstrMessageEvent):
         """删除图库中的图片"""
@@ -264,9 +262,17 @@ class KCBXTPlugin(Star):
             yield event.plain_result(f"图库【{gallery_name}】不存在")
             return
 
-        index = int(args[2]) if len(args) > 2 else None
-        result = gallery.delete_image(index)
-        yield event.plain_result(result)
+        try:
+            if len(args) > 2:
+                # 删除指定图片
+                index = int(args[2])
+                result = gallery.delete_image(index)
+            else:
+                # 清空图库
+                result = gallery.delete_image()
+            yield event.plain_result(result)
+        except Exception as e:
+            yield event.plain_result(f"删除图片失败: {str(e)}")
 
     @filter.command("查看")
     async def view_image(self, event: AstrMessageEvent):
@@ -282,27 +288,34 @@ class KCBXTPlugin(Star):
             yield event.plain_result(f"图库【{gallery_name}】不存在")
             return
 
-        index = int(args[2]) if len(args) > 2 else None
-        image_path = gallery.get_image(index)
-        if image_path:
-            yield event.image_result(image_path)
-        else:
-            yield event.plain_result("未找到图片")
+        try:
+            if len(args) > 2:
+                # 查看指定图片
+                index = int(args[2])
+                image_path = gallery.get_image(index)
+            else:
+                # 随机查看图片
+                image_path = gallery.get_image()
+            
+            if image_path:
+                yield event.image_result(image_path)
+            else:
+                yield event.plain_result(f"图库【{gallery_name}】中没有图片")
+        except Exception as e:
+            yield event.plain_result(f"查看图片失败: {str(e)}")
 
     @filter.command("图库列表")
     async def list_galleries(self, event: AstrMessageEvent):
         """列出所有图库"""
-        if not self.gm.galleries:
-            yield event.plain_result("暂无图库")
+        galleries = self.gm.galleries
+        if not galleries:
+            yield event.plain_result("当前没有图库")
             return
 
-        msg = "【图库列表】\n"
-        for gallery in self.gm.galleries.values():
-            msg += f"图库名：{gallery.name}\n"
-            msg += f"创建者：{gallery.creator_name}\n"
-            msg += f"图片数量：{len(os.listdir(gallery.path))}\n"
-            msg += f"容量：{gallery.capacity}\n"
-            msg += "-------------------\n"
+        msg = "图库列表：\n"
+        for name, gallery in galleries.items():
+            info = gallery.get_info()
+            msg += f"【{name}】- {info['image_count']}张图片\n"
         yield event.plain_result(msg)
 
     @filter.command("图库详情")
@@ -320,59 +333,62 @@ class KCBXTPlugin(Star):
             return
 
         info = gallery.get_info()
-        msg = f"【图库详情】\n"
-        msg += f"图库名：{info['name']}\n"
+        msg = f"图库【{gallery_name}】详情：\n"
         msg += f"创建者：{info['creator_name']}\n"
         msg += f"图片数量：{info['image_count']}\n"
-        msg += f"容量：{info['capacity']}\n"
+        msg += f"容量上限：{info['capacity']}\n"
         msg += f"压缩：{'开启' if info['compress'] else '关闭'}\n"
         msg += f"去重：{'开启' if info['duplicate'] else '关闭'}\n"
-        msg += f"匹配模式：{'模糊' if info['fuzzy'] else '精准'}\n"
-        msg += f"关键词：{', '.join(info['keywords'])}"
+        msg += f"模糊匹配：{'开启' if info['fuzzy'] else '关闭'}\n"
+        if info['keywords']:
+            msg += f"关键词：{', '.join(info['keywords'])}\n"
         yield event.plain_result(msg)
 
     async def _download_file(self, url: str) -> bytes:
         """下载文件"""
-        if url.startswith("http://") or url.startswith("https://"):
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as resp:
-                    resp.raise_for_status()
+        try:
+            async with self.context.http.get(url) as resp:
+                if resp.status == 200:
                     return await resp.read()
-        else:
-            if os.path.exists(url):
-                with open(url, "rb") as f:
-                    return f.read()
-            raise FileNotFoundError(f"文件不存在: {url}")
+                return None
+        except Exception as e:
+            logger.error(f"下载文件失败: {str(e)}")
+            return None
 
 def get_today_weekday():
-    # 返回如"周一"
-    week_map = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-    return week_map[datetime.datetime.now().weekday()]
+    """获取今天的星期"""
+    import locale
+    locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
+    week_map = {
+        'Monday': '星期一',
+        'Tuesday': '星期二',
+        'Wednesday': '星期三',
+        'Thursday': '星期四',
+        'Friday': '星期五',
+        'Saturday': '星期六',
+        'Sunday': '星期日'
+    }
+    return week_map.get(datetime.datetime.now().strftime('%A'), '未知')
 
-def get_class_time_from_str(time_str):
-    # 简单示例：如"08:00"或"第1-2节"映射为08:00
-    # 实际可根据学校作息表自定义
-    if "第1-2节" in time_str:
+def get_class_time_from_str(time_str: str) -> tuple:
+    """从时间字符串解析上课时间"""
+    try:
+        # 解析时间字符串（格式：HH:MM-HH:MM）
+        start_time = time_str.split('-')[0]
+        hour, minute = map(int, start_time.split(':'))
+        return (hour, minute)
+    except:
+        # 如果解析失败，返回默认时间
         return (8, 0)
-    if "第3-4节" in time_str:
-        return (10, 0)
-    if "第5-6节" in time_str:
-        return (14, 0)
-    if "第7-8节" in time_str:
-        return (16, 0)
-    return None
 
-async def download_file(url, save_path):
-    if url.startswith("http://") or url.startswith("https://"):
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                resp.raise_for_status()
-                with open(save_path, "wb") as f:
+async def download_file(url: str, save_path: str):
+    """下载文件到指定路径"""
+    try:
+        async with self.context.http.get(url) as resp:
+            if resp.status == 200:
+                with open(save_path, 'wb') as f:
                     f.write(await resp.read())
-    else:
-        if os.path.exists(url):
-            shutil.copy(url, save_path)
-        else:
-            raise FileNotFoundError(f"文件处理失败：本地文件不存在或无法直接访问: {url}。可能需要配置对应平台的API来下载文件。") 
+                return True
+    except Exception as e:
+        logger.error(f"下载文件失败: {str(e)}")
+    return False 
