@@ -13,6 +13,26 @@ import pytesseract
 from datetime import datetime
 import locale
 
+def parse_word(file_path: str) -> List[Dict[str, Any]]:
+    """解析Word格式的课程表"""
+    parser = ScheduleParser()
+    return parser.parse_word(file_path)
+
+def parse_xlsx(file_path: str) -> List[Dict[str, Any]]:
+    """解析Excel格式的课程表"""
+    parser = ScheduleParser()
+    return parser.parse_xlsx(file_path)
+
+def parse_image(file_path: str) -> List[Dict[str, Any]]:
+    """解析图片格式的课程表"""
+    parser = ScheduleParser()
+    return parser.parse_image(file_path)
+
+def parse_text_schedule(text: str) -> List[Dict[str, Any]]:
+    """解析文本格式的课程表"""
+    parser = ScheduleParser()
+    return parser.parse_text_schedule(text)
+
 class ScheduleParser:
     def __init__(self):
         # 设置中文环境
@@ -209,24 +229,4 @@ class ScheduleParser:
                 if key in time:
                     return value
         
-        return time
-
-def parse_word(file_path: str) -> List[Dict[str, Any]]:
-    """解析Word格式的课程表"""
-    parser = ScheduleParser()
-    return parser.parse_word(file_path)
-
-def parse_xlsx(file_path: str) -> List[Dict[str, Any]]:
-    """解析Excel格式的课程表"""
-    parser = ScheduleParser()
-    return parser.parse_xlsx(file_path)
-
-def parse_image(file_path: str) -> List[Dict[str, Any]]:
-    """解析图片格式的课程表"""
-    parser = ScheduleParser()
-    return parser.parse_image(file_path)
-
-def parse_text_schedule(text: str) -> List[Dict[str, Any]]:
-    """解析文本格式的课程表"""
-    parser = ScheduleParser()
-    return parser.parse_text_schedule(text) 
+        return time 
