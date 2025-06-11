@@ -1,0 +1,134 @@
+{
+    "data_dir": {
+        "description": "数据存储目录",
+        "type": "string",
+        "obvious_hint": true,
+        "hint": "存储课程表和图库数据的目录，请使用绝对路径",
+        "default": "data/plugins_data/kcbxt"
+    },
+    "reminder_config": {
+        "description": "课程提醒设置",
+        "type": "object",
+        "hint": "设置课程提醒的相关参数",
+        "items": {
+            "reminder_time": {
+                "description": "课前提醒时间（分钟）",
+                "type": "int",
+                "hint": "在课程开始前多少分钟发送提醒",
+                "default": 10
+            },
+            "enable_reminder": {
+                "description": "启用课程提醒",
+                "type": "bool",
+                "hint": "是否启用课前提醒功能",
+                "default": true
+            }
+        }
+    },
+    "gallery_config": {
+        "description": "图库设置",
+        "type": "object",
+        "hint": "设置图库的相关参数",
+        "items": {
+            "default_compress": {
+                "description": "新建图库时自动打开压缩开关",
+                "type": "bool",
+                "hint": "往新图库存图时，若图片尺寸大于压缩阈值则压缩图片",
+                "default": true
+            },
+            "compress_size": {
+                "description": "压缩阈值",
+                "type": "int",
+                "hint": "单位为像素，图片在512像素以下时qq以小图显示",
+                "default": 512
+            },
+            "default_duplicate": {
+                "description": "新建图库时自动打开去重开关",
+                "type": "bool",
+                "hint": "往新图库存图时，若存在重复图片则终止操作",
+                "default": true
+            },
+            "default_fuzzy": {
+                "description": "新建图库时自动设置为模糊匹配",
+                "type": "bool",
+                "hint": "",
+                "default": false
+            },
+            "default_capacity": {
+                "description": "图库的默认容量上限",
+                "type": "int",
+                "hint": "图库中的图片数量达到此数量时，图库将无法添加图片",
+                "default": 200
+            }
+        }
+    },
+    "permission_config": {
+        "description": "权限设置",
+        "type": "object",
+        "hint": "设置图库的权限控制",
+        "items": {
+            "allow_add": {
+                "description": "允许非管理员向公共图库添加图片",
+                "type": "bool",
+                "hint": "图库的图片太少时建议打开，不过要小心被别人塞进不好的图片",
+                "default": true
+            },
+            "allow_del": {
+                "description": "允许非管理员删除公共图库的图片",
+                "type": "bool",
+                "hint": "建议关闭",
+                "default": false
+            },
+            "allow_view": {
+                "description": "允许非管理员查看公共图库的图片",
+                "type": "bool",
+                "hint": "建议打开",
+                "default": true
+            }
+        }
+    },
+    "auto_collect_config": {
+        "description": "自动收集设置",
+        "type": "object",
+        "hint": "当图库的图片较少时，可以打开自动收集功能，将自动收集用户图片，存到每个人对应的图库",
+        "items": {
+            "enable_collect": {
+                "description": "启用自动收集",
+                "type": "bool",
+                "hint": "",
+                "default": true
+            },
+            "white_list": {
+                "description": "启用自动收集的群聊白名单",
+                "type": "list",
+                "hint": "不填表示启用所有群聊",
+                "default": []
+            },
+            "collect_compressed_img": {
+                "description": "图片达到压缩阈值时是否仍然收集",
+                "type": "bool",
+                "hint": "仅对开启了去重的图库有效，未开启去重的图库不受限",
+                "default": false
+            }
+        }
+    },
+    "ocr_config": {
+        "description": "OCR设置",
+        "type": "object",
+        "hint": "设置OCR识别相关参数",
+        "items": {
+            "api_key": {
+                "description": "OCR API密钥",
+                "type": "string",
+                "hint": "用于识别图片中的课程表信息",
+                "default": ""
+            },
+            "api_url": {
+                "description": "OCR API地址",
+                "type": "string",
+                "hint": "OCR服务的API地址",
+                "default": ""
+            }
+        }
+    }
+} 
